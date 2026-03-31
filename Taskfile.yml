@@ -1,0 +1,98 @@
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  PYTHON: uv run --project {{.TASKFILE_DIR}}
+  CLI: "{{.PYTHON}} snow-utils-extvolumes"
+  BUCKET: iceberg-demo
+  AWS_REGION: '{{.AWS_REGION | default "us-west-2"}}'
+
+env:
+  AWS_REGION: "{{.AWS_REGION}}"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list-all
+
+  setup:
+    desc: Install dependencies
+    cmds:
+      - uv venv
+      - uv sync
+
+  create:
+    desc: Create S3 bucket, IAM role, and Snowflake external volume
+    cmds:
+      - "{{.CLI}} --region {{.AWS_REGION}} create {{.CLI_ARGS}}"
+    env:
+      BUCKET: "{{.BUCKET}}"
+      EXTERNAL_VOLUME_NAME: "{{.EXTERNAL_VOLUME_NAME}}"
+    vars:
+      BUCKET: '{{.BUCKET | default ""}}'
+      EXTERNAL_VOLUME_NAME: '{{.EXTERNAL_VOLUME_NAME | default ""}}'
+
+  delete:
+    desc: Delete external volume and AWS resources
+    cmds:
+      - "{{.CLI}} --region {{.AWS_REGION}} delete {{.CLI_ARGS}}"
+    env:
+      BUCKET: "{{.BUCKET}}"
+      EXTERNAL_VOLUME_NAME: "{{.EXTERNAL_VOLUME_NAME}}"
+    vars:
+      BUCKET: '{{.BUCKET | default ""}}'
+      EXTERNAL_VOLUME_NAME: '{{.EXTERNAL_VOLUME_NAME | default ""}}'
+    prompt: "This will delete AWS and Snowflake resources. Continue?"
+
+  verify:
+    desc: Verify external volume connectivity
+    cmds:
+      - "{{.CLI}} verify"
+    env:
+      EXTERNAL_VOLUME_NAME: "{{.VOLUME}}"
+    vars:
+      VOLUME: '{{.VOLUME | default ""}}'
+
+  describe:
+    desc: Describe external volume properties
+    cmds:
+      - "{{.CLI}} describe"
+    env:
+      EXTERNAL_VOLUME_NAME: "{{.VOLUME}}"
+    vars:
+      VOLUME: '{{.VOLUME | default ""}}'
+
+  update-trust:
+    desc: Update IAM trust policy from external volume
+    cmds:
+      - "{{.CLI}} --region {{.AWS_REGION}} update-trust {{.CLI_ARGS}}"
+    env:
+      BUCKET: "{{.BUCKET}}"
+      EXTERNAL_VOLUME_NAME: "{{.VOLUME}}"
+    vars:
+      BUCKET: '{{.BUCKET | default ""}}'
+      VOLUME: '{{.VOLUME | default ""}}'
+
+  up:
+    desc: Quick start - create bucket and external volume with defaults
+    cmds:
+      - task: create
+    env:
+      BUCKET: '{{.BUCKET | default "iceberg-demo"}}'
+
+  down:
+    desc: Tear down - delete bucket and external volume
+    cmds:
+      - task: delete
+    env:
+      BUCKET: '{{.BUCKET | default "iceberg-demo"}}'
+    vars:
+      CLI_ARGS: "--delete-bucket --force"
+
+  help:
+    desc: Show extvolume CLI options
+    cmds:
+      - "{{.CLI}} --help"
+      - "{{.CLI}} create --help"

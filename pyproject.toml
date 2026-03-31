@@ -1,0 +1,28 @@
+[project]
+name = "snow-utils-extvolumes"
+version = "0.1.0"
+description = "Snowflake external volumes manager - a snow-utils plugin"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.35.0",
+    "click>=8.0",
+    "python-dotenv>=1.2.1",
+]
+
+[project.scripts]
+snow-utils-extvolumes = "snow_utils_extvolumes:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/snow_utils_extvolumes"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
