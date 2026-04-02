@@ -26,6 +26,9 @@ import sys
 from pathlib import Path
 
 import click
+from dotenv import load_dotenv
+
+load_dotenv()
 
 DEFAULT_DB = "SNOW_UTILS"
 
