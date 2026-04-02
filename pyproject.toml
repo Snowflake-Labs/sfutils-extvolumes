@@ -8,10 +8,12 @@ dependencies = [
     "boto3>=1.35.0",
     "click>=8.0",
     "python-dotenv>=1.2.1",
+    "snowflake-cli>=3.16.0",
 ]
 
 [project.scripts]
 snow-utils-extvolumes = "snow_utils_extvolumes:cli"
+check-setup = "snow_utils_extvolumes.check_setup:check"
 
 [build-system]
 requires = ["hatchling"]
