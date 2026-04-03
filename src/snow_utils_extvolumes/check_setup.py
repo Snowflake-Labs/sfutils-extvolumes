@@ -14,8 +14,9 @@
 # limitations under the License.
 """Pre-flight check for snow-utils shared infrastructure (database + schemas).
 
-Checks whether the SNOW_UTILS_DB database exists (via Snowflake CLI). Does not
-validate SA_ROLE or other skill-specific objects.
+Checks whether the SNOW_UTILS_DB database exists (via Snowflake CLI). Optionally
+reports CSP CLI tool availability on PATH for external volume workflows per
+storage provider (S3/aws, Azure/az, GCS/gcloud).
 """
 
 import json
@@ -31,6 +32,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_DB = "SNOW_UTILS"
+
+# Lowercase CLI value -> list of (STORAGE_PROVIDER label, executable basename)
+PROVIDER_CLI_TOOLS: dict[str, list[tuple[str, str]]] = {
+    "s3": [("S3", "aws")],
+    "azure": [("AZURE", "az")],
+    "gcs": [("GCS", "gcloud")],
+}
+
+SUPPORTED_STORAGE_PROVIDERS = ["S3"]
+PLANNED_STORAGE_PROVIDERS = ["AZURE", "GCS"]
 
 
 def require_snow_cli() -> None:
@@ -72,6 +83,22 @@ def check_database_exists(db_name: str) -> bool:
         return False
 
 
+def csp_cli_tools_for_provider(provider_key: str) -> tuple[list[dict[str, object]], bool]:
+    """Return tool status dicts and whether all required tools are on PATH."""
+    pairs = PROVIDER_CLI_TOOLS[provider_key]
+    tools: list[dict[str, object]] = []
+    for prov_label, exe in pairs:
+        tools.append(
+            {
+                "provider": prov_label,
+                "tool": exe,
+                "available": shutil.which(exe) is not None,
+            }
+        )
+    all_available = all(bool(t["available"]) for t in tools)
+    return tools, all_available
+
+
 def do_run_setup(db_name: str, script_dir: Path) -> bool:
     """Run the setup script with ACCOUNTADMIN."""
     setup_sql = script_dir / "snow-utils-setup.sql"
@@ -111,7 +138,18 @@ def do_run_setup(db_name: str, script_dir: Path) -> bool:
 @click.option("--database", "-d", help="Database name (or set SNOW_UTILS_DB env var)")
 @click.option("--run-setup", is_flag=True, help="Run setup if infrastructure missing")
 @click.option("--suggest", is_flag=True, help="Output suggested defaults as JSON")
-def check(database: str | None, run_setup: bool, suggest: bool):
+@click.option(
+    "--provider",
+    type=click.Choice(list(PROVIDER_CLI_TOOLS.keys()), case_sensitive=False),
+    default="s3",
+    help="Storage provider: which CSP CLI tools to verify (default: s3).",
+)
+def check(
+    database: str | None,
+    run_setup: bool,
+    suggest: bool,
+    provider: str,
+) -> None:
     """Check if snow-utils infrastructure is set up.
 
     Non-interactive - all values via CLI args or env vars.
@@ -126,6 +164,9 @@ def check(database: str | None, run_setup: bool, suggest: bool):
 
     require_snow_cli()
 
+    provider_key = provider.lower()
+    csp_tools, csp_tools_ready = csp_cli_tools_for_provider(provider_key)
+
     user = os.environ.get("SNOWFLAKE_USER", "").upper()
     default_db = f"{user}_SNOW_UTILS" if user else DEFAULT_DB
 
@@ -139,6 +180,11 @@ def check(database: str | None, run_setup: bool, suggest: bool):
                     "suggested_database": default_db,
                     "database_exists": db_exists,
                     "ready": db_exists,
+                    "provider": provider_key,
+                    "csp_cli_tools": csp_tools,
+                    "csp_tools_ready": csp_tools_ready,
+                    "supported_storage_providers": SUPPORTED_STORAGE_PROVIDERS,
+                    "planned_storage_providers": PLANNED_STORAGE_PROVIDERS,
                 }
             )
         )
@@ -154,6 +200,14 @@ def check(database: str | None, run_setup: bool, suggest: bool):
     if user:
         click.echo(f"Detected user: {user}")
     click.echo(f"  SNOW_UTILS_DB: {db_name}\n")
+
+    click.echo(f"CSP CLI tools (provider={provider_key})")
+    for entry in csp_tools:
+        exe = str(entry["tool"])
+        ok = bool(entry["available"])
+        line = f"  {exe}: " + ("OK" if ok else "MISSING (not on PATH)")
+        click.echo(click.style(line, fg="green" if ok else "yellow"))
+    click.echo()
 
     db_exists = check_database_exists(db_name)
 

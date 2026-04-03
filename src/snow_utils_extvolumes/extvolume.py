@@ -770,6 +770,9 @@ def cli(
     Setup and manage external volumes with S3 storage for Iceberg tables,
     data lake access, COPY INTO unload, and external stages.
 
+    Storage backends: AWS S3 is supported. Azure Blob Storage and Google Cloud
+    Storage are not implemented in this CLI yet.
+
     \b
     By default, AWS resources are prefixed with your username to avoid conflicts
     in shared accounts. Use --no-prefix to disable or --prefix to customize.
