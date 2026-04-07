@@ -14,20 +14,20 @@
 -- limitations under the License.
 
 -- =============================================================================
--- Snow-Utils Setup Script
+-- sfutils Setup Script
 -- =============================================================================
--- Creates the shared database and schemas for snow-utils skills.
+-- Creates the shared database and schemas for sf-utils skills.
 -- Role creation is handled by individual skills (e.g., PAT skill creates
 -- demo-specific roles like {PROJECT}_ACCESS).
 --
 -- Environment Variables (from .env):
---   SNOW_UTILS_DB  - Name of the database to create
+--   SF_UTILS_DB  - Name of the database to create (legacy: SNOW_UTILS_DB also honored by CLI)
 --   SA_ADMIN_ROLE  - Admin role to run setup (default: ACCOUNTADMIN)
 --
 -- What this creates:
---   - SNOW_UTILS_DB database
---   - SNOW_UTILS_DB.NETWORKS schema (for network rules)
---   - SNOW_UTILS_DB.POLICIES schema (for auth policies)
+--   - SF_UTILS_DB database
+--   - SF_UTILS_DB.NETWORKS schema (for network rules)
+--   - SF_UTILS_DB.POLICIES schema (for auth policies)
 --
 -- What skills create (not this script):
 --   - SA_ROLE ({PROJECT}_ACCESS) - consumer role
@@ -38,7 +38,7 @@
 --   - Must be run by SA_ADMIN_ROLE (default: ACCOUNTADMIN)
 --
 -- Usage:
---   snow sql -f snow-utils-setup.sql --enable-templating ALL --role <SA_ADMIN_ROLE>
+--   snow sql -f sfutils-setup.sql --enable-templating ALL --role <SA_ADMIN_ROLE>
 -- =============================================================================
 
 USE ROLE <% ctx.env.get('SA_ADMIN_ROLE', 'ACCOUNTADMIN') %>;
@@ -47,16 +47,16 @@ USE ROLE <% ctx.env.get('SA_ADMIN_ROLE', 'ACCOUNTADMIN') %>;
 -- Step 1: Create Database and Schemas
 -- =============================================================================
 
-CREATE DATABASE IF NOT EXISTS <% ctx.env.SNOW_UTILS_DB %>
-    COMMENT = 'Shared database for snow-utils skills (network rules, policies, etc.)';
+CREATE DATABASE IF NOT EXISTS <% ctx.env.SF_UTILS_DB %>
+    COMMENT = 'Shared database for sf-utils skills (network rules, policies, etc.)';
 
-CREATE SCHEMA IF NOT EXISTS <% ctx.env.SNOW_UTILS_DB %>.NETWORKS
+CREATE SCHEMA IF NOT EXISTS <% ctx.env.SF_UTILS_DB %>.NETWORKS
     COMMENT = 'Schema for network rules';
-CREATE SCHEMA IF NOT EXISTS <% ctx.env.SNOW_UTILS_DB %>.POLICIES
+CREATE SCHEMA IF NOT EXISTS <% ctx.env.SF_UTILS_DB %>.POLICIES
     COMMENT = 'Schema for authentication policies';
 
 -- =============================================================================
 -- Verification
 -- =============================================================================
 
-SELECT 'Snow-utils database setup complete: <% ctx.env.SNOW_UTILS_DB %>' AS status;
+SELECT 'sfutils database setup complete: <% ctx.env.SF_UTILS_DB %>' AS status;

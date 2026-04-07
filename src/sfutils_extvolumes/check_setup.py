@@ -12,9 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pre-flight check for snow-utils shared infrastructure (database + schemas).
+"""Pre-flight check for sfutils shared infrastructure (database + schemas).
 
-Checks whether the SNOW_UTILS_DB database exists (via Snowflake CLI). Optionally
+Checks whether the SF_UTILS_DB database exists (via Snowflake CLI). Optionally
 reports CSP CLI tool availability on PATH and credential-related environment
 variables (set/unset only, never values) for external volume workflows per
 storage provider (S3/aws, Azure/az, GCS/gcloud).
@@ -32,7 +32,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEFAULT_DB = "SNOW_UTILS"
+DEFAULT_DB = "SF_UTILS"
+
+
+def resolved_sf_utils_db(*, database: str | None, default_db: str) -> str:
+    """Resolve database name: CLI arg, then SF_UTILS_DB, then legacy SNOW_UTILS_DB."""
+    return (
+        database
+        or os.environ.get("SF_UTILS_DB")
+        or os.environ.get("SNOW_UTILS_DB")
+        or default_db
+    )
 
 # Lowercase CLI value -> list of (STORAGE_PROVIDER label, executable basename)
 PROVIDER_CLI_TOOLS: dict[str, list[tuple[str, str]]] = {
@@ -220,17 +230,17 @@ def csp_cli_tools_for_provider(provider_key: str) -> tuple[list[dict[str, object
 
 def do_run_setup(db_name: str, script_dir: Path) -> bool:
     """Run the setup script with ACCOUNTADMIN."""
-    setup_sql = script_dir / "snow-utils-setup.sql"
+    setup_sql = script_dir / "sfutils-setup.sql"
     if not setup_sql.exists():
         click.echo(click.style(f"Setup script not found: {setup_sql}", fg="red"))
         return False
 
     click.echo("\nRunning setup with ACCOUNTADMIN...")
-    click.echo(f"  SNOW_UTILS_DB: {db_name}")
+    click.echo(f"  SF_UTILS_DB: {db_name}")
     click.echo()
 
     env = os.environ.copy()
-    env["SNOW_UTILS_DB"] = db_name
+    env["SF_UTILS_DB"] = db_name
 
     cmd = [
         "snow",
@@ -254,7 +264,11 @@ def do_run_setup(db_name: str, script_dir: Path) -> bool:
 
 
 @click.command()
-@click.option("--database", "-d", help="Database name (or set SNOW_UTILS_DB env var)")
+@click.option(
+    "--database",
+    "-d",
+    help="Database name (or set SF_UTILS_DB env var; legacy SNOW_UTILS_DB accepted)",
+)
 @click.option("--run-setup", is_flag=True, help="Run setup if infrastructure missing")
 @click.option("--suggest", is_flag=True, help="Output suggested defaults as JSON")
 @click.option(
@@ -269,7 +283,7 @@ def check(
     suggest: bool,
     provider: str,
 ) -> None:
-    """Check if snow-utils infrastructure is set up.
+    """Check if sfutils infrastructure is set up.
 
     Non-interactive - all values via CLI args or env vars.
     Designed to be called by Cortex Code skills.
@@ -289,10 +303,10 @@ def check(
     cred_signal, cred_satisfied_by, cred_note = csp_credential_signal_for_provider(provider_key)
 
     user = os.environ.get("SNOWFLAKE_USER", "").upper()
-    default_db = f"{user}_SNOW_UTILS" if user else DEFAULT_DB
+    default_db = f"{user}_SF_UTILS" if user else DEFAULT_DB
 
     if suggest:
-        db_to_check = database or os.environ.get("SNOW_UTILS_DB") or default_db
+        db_to_check = resolved_sf_utils_db(database=database, default_db=default_db)
         db_exists = check_database_exists(db_to_check)
         click.echo(
             json.dumps(
@@ -315,16 +329,16 @@ def check(
         )
         sys.exit(0)
 
-    db_name = database or os.environ.get("SNOW_UTILS_DB") or default_db
+    db_name = resolved_sf_utils_db(database=database, default_db=default_db)
 
     ver_result = subprocess.run(["snow", "--version"], capture_output=True, text=True)
     snow_version = ver_result.stdout.strip() if ver_result.returncode == 0 else "unknown"
     click.echo(f"Using {snow_version}")
 
-    click.echo("Snow-utils infrastructure check\n")
+    click.echo("sfutils infrastructure check\n")
     if user:
         click.echo(f"Detected user: {user}")
-    click.echo(f"  SNOW_UTILS_DB: {db_name}\n")
+    click.echo(f"  SF_UTILS_DB: {db_name}\n")
 
     click.echo(f"CSP CLI tools (provider={provider_key})")
     for entry in csp_tools:

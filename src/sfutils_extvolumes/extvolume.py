@@ -37,7 +37,7 @@ import boto3
 import click
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
-from snow_utils_extvolumes._snow import (
+from sfutils_extvolumes._snow import (
     mask_sensitive_string,
     run_snow_sql,
     run_snow_sql_stdin,
@@ -148,13 +148,13 @@ def normalize_identifier(name: str, style: str = "snowflake") -> str:
 
 
 def format_comment(prefix: str | None, bucket: str) -> str:
-    """Format comment using consistent pattern across all snow-utils skills.
+    """Format comment using consistent pattern across sf-utils skills.
 
-    Pattern: "Used by {USER} - {PROJECT} app - managed by snow-utils-volumes"
+    Pattern: "Used by {USER} - {PROJECT} app - managed by sf-utils-volumes"
     """
     user_part = normalize_identifier(prefix, "snowflake") if prefix else "USER"
     project_part = normalize_identifier(bucket, "snowflake")
-    return f"Used by {user_part} - {project_part} app - managed by snow-utils-volumes"
+    return f"Used by {user_part} - {project_part} app - managed by sf-utils-volumes"
 
 
 @dataclass
@@ -265,12 +265,12 @@ def get_aws_account_id(sts_client: Any) -> str:
 def get_resource_tags(prefix: str | None, bucket: str, volume_name: str) -> list[dict[str, str]]:
     """Generate AWS resource tags for traceability and cost allocation.
 
-    Tags follow the consistent snow-utils pattern for all AWS resources.
+    Tags follow the consistent sfutils pattern for all AWS resources.
     """
     user_part = normalize_identifier(prefix, "snowflake") if prefix else "UNKNOWN"
     project_part = normalize_identifier(bucket, "snowflake")
     return [
-        {"Key": "managed-by", "Value": "snow-utils-volumes"},
+        {"Key": "managed-by", "Value": "sfutils-extvolumes"},
         {"Key": "user", "Value": user_part},
         {"Key": "project", "Value": project_part},
         {"Key": "snowflake-volume", "Value": volume_name},

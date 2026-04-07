@@ -1,9 +1,9 @@
 """
-Vendored snow CLI utilities for snow-utils-extvolumes.
+Vendored snow CLI utilities for sfutils-extvolumes.
 
 Thin wrappers around the `snow` CLI for executing SQL, plus
 sensitive-value masking for AWS ARNs, account IDs, and external IDs.
-Copied from snow-utils-common so this package has zero external dependencies
+Originally aligned with shared sfutils patterns; this package is self-contained
 beyond click/boto3. Feel free to customize for extvolume-specific needs.
 """
 

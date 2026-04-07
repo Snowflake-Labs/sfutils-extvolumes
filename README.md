@@ -1,4 +1,4 @@
-# snow-utils-extvolumes
+# sfutils-extvolumes
 
 Create and manage Snowflake external volumes with S3 storage for Iceberg tables, data lakes, COPY INTO unload, and external stages. Handles the full AWS + Snowflake setup: S3 bucket, IAM policy, IAM role, trust policy, and external volume.
 
@@ -21,26 +21,26 @@ uv sync          # or: pip install .
 
 ```bash
 # Create everything with defaults (bucket prefixed with your username)
-snow-utils-extvolumes create --bucket iceberg-demo
+sfutils-extvolumes create --bucket iceberg-demo
 # Creates: ksampath-iceberg-demo (S3), KSAMPATH_ICEBERG_DEMO_EXTERNAL_VOLUME (Snowflake)
 
 # Preview without creating anything
-snow-utils-extvolumes create --bucket iceberg-demo --dry-run
+sfutils-extvolumes create --bucket iceberg-demo --dry-run
 
 # No username prefix
-snow-utils-extvolumes --no-prefix create --bucket iceberg-demo
+sfutils-extvolumes --no-prefix create --bucket iceberg-demo
 
 # Custom prefix
-snow-utils-extvolumes --prefix myproject create --bucket data-lake
+sfutils-extvolumes --prefix myproject create --bucket data-lake
 
 # Delete everything
-snow-utils-extvolumes delete --bucket iceberg-demo --delete-bucket --force
+sfutils-extvolumes delete --bucket iceberg-demo --delete-bucket --force
 
 # Verify external volume connectivity
-snow-utils-extvolumes verify --volume-name MY_EXTERNAL_VOLUME
+sfutils-extvolumes verify --volume-name MY_EXTERNAL_VOLUME
 
 # Re-sync IAM trust policy
-snow-utils-extvolumes update-trust --bucket iceberg-demo
+sfutils-extvolumes update-trust --bucket iceberg-demo
 ```
 
 ## What `create` Does
@@ -112,6 +112,10 @@ CATALOG = 'SNOWFLAKE'
 EXTERNAL_VOLUME = 'KSAMPATH_ICEBERG_DEMO_EXTERNAL_VOLUME'
 BASE_LOCATION = 'my_table';
 ```
+
+## Related
+
+- [sf-utils-skills](https://github.com/Snowflake-Labs/sf-utils-skills) — Cortex Code skill `sf-utils-volumes` (after repo rename from `snow-utils-skills`)
 
 ## License
 

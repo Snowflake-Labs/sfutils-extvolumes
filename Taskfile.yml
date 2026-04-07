@@ -4,7 +4,7 @@ dotenv: [".env"]
 
 vars:
   PYTHON: uv run --project {{.TASKFILE_DIR}}
-  CLI: "{{.PYTHON}} snow-utils-extvolumes"
+  CLI: "{{.PYTHON}} sfutils-extvolumes"
   BUCKET: iceberg-demo
   AWS_REGION: '{{.AWS_REGION | default "us-west-2"}}'
 
