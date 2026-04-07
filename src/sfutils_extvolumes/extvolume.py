@@ -148,13 +148,13 @@ def normalize_identifier(name: str, style: str = "snowflake") -> str:
 
 
 def format_comment(prefix: str | None, bucket: str) -> str:
-    """Format comment using consistent pattern across sf-utils skills.
+    """Format comment using consistent pattern across sfutils skills.
 
-    Pattern: "Used by {USER} - {PROJECT} app - managed by sf-utils-volumes"
+    Pattern: "Used by {USER} - {PROJECT} app - managed by sfutils-extvolumes"
     """
     user_part = normalize_identifier(prefix, "snowflake") if prefix else "USER"
     project_part = normalize_identifier(bucket, "snowflake")
-    return f"Used by {user_part} - {project_part} app - managed by sf-utils-volumes"
+    return f"Used by {user_part} - {project_part} app - managed by sfutils-extvolumes"
 
 
 @dataclass
