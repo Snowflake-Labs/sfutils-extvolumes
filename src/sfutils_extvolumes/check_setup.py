@@ -44,6 +44,15 @@ def resolved_sf_utils_db(*, database: str | None, default_db: str) -> str:
         or default_db
     )
 
+
+def resolved_sa_admin_role(*, admin_role: str | None) -> str:
+    """Resolve admin role: --admin-role / SA_ADMIN_ROLE, then ACCOUNTADMIN."""
+    for candidate in (admin_role, os.environ.get("SA_ADMIN_ROLE")):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+    return "ACCOUNTADMIN"
+
+
 # Lowercase CLI value -> list of (STORAGE_PROVIDER label, executable basename)
 PROVIDER_CLI_TOOLS: dict[str, list[tuple[str, str]]] = {
     "s3": [("S3", "aws")],
@@ -228,19 +237,20 @@ def csp_cli_tools_for_provider(provider_key: str) -> tuple[list[dict[str, object
     return tools, all_available
 
 
-def do_run_setup(db_name: str, script_dir: Path) -> bool:
-    """Run the setup script with ACCOUNTADMIN."""
+def do_run_setup(db_name: str, script_dir: Path, admin_role: str) -> bool:
+    """Run the setup script using admin_role for snow CLI and templating env."""
     setup_sql = script_dir / "sfutils-setup.sql"
     if not setup_sql.exists():
         click.echo(click.style(f"Setup script not found: {setup_sql}", fg="red"))
         return False
 
-    click.echo("\nRunning setup with ACCOUNTADMIN...")
+    click.echo(f"\nRunning setup with role {admin_role}...")
     click.echo(f"  SF_UTILS_DB: {db_name}")
     click.echo()
 
     env = os.environ.copy()
     env["SF_UTILS_DB"] = db_name
+    env["SA_ADMIN_ROLE"] = admin_role
 
     cmd = [
         "snow",
@@ -250,7 +260,7 @@ def do_run_setup(db_name: str, script_dir: Path) -> bool:
         "--enable-templating",
         "ALL",
         "--role",
-        "ACCOUNTADMIN",
+        admin_role,
     ]
 
     result = subprocess.run(cmd, env=env, capture_output=False)
@@ -272,6 +282,12 @@ def do_run_setup(db_name: str, script_dir: Path) -> bool:
 @click.option("--run-setup", is_flag=True, help="Run setup if infrastructure missing")
 @click.option("--suggest", is_flag=True, help="Output suggested defaults as JSON")
 @click.option(
+    "--admin-role",
+    envvar="SA_ADMIN_ROLE",
+    default=None,
+    help="Admin role for setup (or set SA_ADMIN_ROLE env var; default ACCOUNTADMIN)",
+)
+@click.option(
     "--provider",
     type=click.Choice(list(PROVIDER_CLI_TOOLS.keys()), case_sensitive=False),
     default="s3",
@@ -281,6 +297,7 @@ def check(
     database: str | None,
     run_setup: bool,
     suggest: bool,
+    admin_role: str | None,
     provider: str,
 ) -> None:
     """Check if sfutils infrastructure is set up.
@@ -378,7 +395,8 @@ def check(
     click.echo(f"  - Database: {db_name}")
     click.echo(f"  - Schemas: {db_name}.NETWORKS, {db_name}.POLICIES")
 
-    success = do_run_setup(db_name, script_dir)
+    resolved_role = resolved_sa_admin_role(admin_role=admin_role)
+    success = do_run_setup(db_name, script_dir, resolved_role)
     sys.exit(0 if success else 1)
 
 
