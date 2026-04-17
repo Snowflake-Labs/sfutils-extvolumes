@@ -8,6 +8,7 @@ beyond click/boto3. Feel free to customize for extvolume-specific needs.
 """
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -148,7 +149,9 @@ def run_snow_sql_stdin(sql: str, *, check: bool = True) -> subprocess.CompletedP
 
     if _snow_cli_options.debug:
         click.echo(f"[DEBUG] Running: {' '.join(cmd)}")
-        click.echo(f"[DEBUG] SQL:\n{sql}")
+        click.echo(f"[DEBUG] SQL ({len(sql)} chars — set SFUTILS_DEBUG_SQL=1 to show)")
+        if os.environ.get("SFUTILS_DEBUG_SQL"):
+            click.echo(sql)
 
     result = subprocess.run(cmd, input=sql, capture_output=True, text=True)
 
