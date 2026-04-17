@@ -582,10 +582,23 @@ def _sql_str(value: str) -> str:
     return value.replace("'", "''")
 
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def _assert_safe_identifier(value: str, label: str = "identifier") -> None:
+    """Raise ClickException if value is not a safe unquoted SQL identifier."""
+    if not _IDENT_RE.match(value):
+        raise click.ClickException(
+            f"Invalid {label} '{value}': must match ^[A-Za-z_][A-Za-z0-9_$]*$"
+        )
+
+
 def get_external_volume_sql(
     config: ExternalVolumeConfig, role_arn: str, force: bool = False
 ) -> str:
     """Generate SQL for creating external volume."""
+    _assert_safe_identifier(config.volume_name, "volume_name")
+    _assert_safe_identifier(config.storage_location_name, "storage_location_name")
     allow_writes = "TRUE" if config.allow_writes else "FALSE"
     create_stmt = (
         "CREATE OR REPLACE EXTERNAL VOLUME" if force else "CREATE EXTERNAL VOLUME IF NOT EXISTS"
@@ -616,6 +629,7 @@ def create_external_volume(
 
 def describe_external_volume(volume_name: str) -> dict[str, str]:
     """Describe external volume and extract AWS IAM user ARN and external ID."""
+    _assert_safe_identifier(volume_name, "volume_name")
     click.echo(f"Describing external volume: {volume_name}")
 
     try:
@@ -664,6 +678,7 @@ def describe_external_volume(volume_name: str) -> dict[str, str]:
 
 def drop_external_volume(volume_name: str) -> None:
     """Drop Snowflake external volume."""
+    _assert_safe_identifier(volume_name, "volume_name")
     click.echo(f"Dropping Snowflake external volume: {volume_name}")
 
     run_snow_sql(f"DROP EXTERNAL VOLUME IF EXISTS {volume_name}")
