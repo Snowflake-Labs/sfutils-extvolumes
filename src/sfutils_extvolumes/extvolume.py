@@ -577,6 +577,11 @@ def delete_iam_role(iam_client: Any, role_name: str, policy_arn: str) -> None:
 # =============================================================================
 
 
+def _sql_str(value: str) -> str:
+    """Escape a value for safe use inside a SQL single-quoted literal."""
+    return value.replace("'", "''")
+
+
 def get_external_volume_sql(
     config: ExternalVolumeConfig, role_arn: str, force: bool = False
 ) -> str:
@@ -585,15 +590,15 @@ def get_external_volume_sql(
     create_stmt = (
         "CREATE OR REPLACE EXTERNAL VOLUME" if force else "CREATE EXTERNAL VOLUME IF NOT EXISTS"
     )
-    comment_clause = f"\n    COMMENT = '{config.comment}'" if config.comment else ""
+    comment_clause = f"\n    COMMENT = '{_sql_str(config.comment)}'" if config.comment else ""
     return f"""{create_stmt} {config.volume_name}
     STORAGE_LOCATIONS = (
         (
-            NAME = '{config.storage_location_name}'
+            NAME = '{_sql_str(config.storage_location_name)}'
             STORAGE_PROVIDER = 'S3'
-            STORAGE_BASE_URL = 's3://{config.bucket_name}/'
-            STORAGE_AWS_ROLE_ARN = '{role_arn}'
-            STORAGE_AWS_EXTERNAL_ID = '{config.external_id}'
+            STORAGE_BASE_URL = 's3://{_sql_str(config.bucket_name)}/'
+            STORAGE_AWS_ROLE_ARN = '{_sql_str(role_arn)}'
+            STORAGE_AWS_EXTERNAL_ID = '{_sql_str(config.external_id)}'
         )
     )
     ALLOW_WRITES = {allow_writes}{comment_clause};"""
@@ -669,7 +674,7 @@ def verify_external_volume(volume_name: str) -> None:
     """Verify external volume connectivity."""
     click.echo(f"Verifying external volume: {volume_name}")
 
-    result = run_snow_sql(f"SELECT SYSTEM$VERIFY_EXTERNAL_VOLUME('{volume_name}')")
+    result = run_snow_sql(f"SELECT SYSTEM$VERIFY_EXTERNAL_VOLUME('{_sql_str(volume_name)}')")
 
     if not result:
         click.echo("⚠ Could not verify external volume")

@@ -212,10 +212,15 @@ def run_sql(query: str) -> list | None:
     return None
 
 
+def _sql_str(value: str) -> str:
+    """Escape a value for safe use inside a SQL single-quoted literal."""
+    return value.replace("'", "''")
+
+
 def check_database_exists(db_name: str) -> bool:
     """Check if a database exists."""
     try:
-        result = run_sql(f"SHOW DATABASES LIKE '{db_name}'")
+        result = run_sql(f"SHOW DATABASES LIKE '{_sql_str(db_name)}'")
         return result is not None and len(result) > 0
     except Exception:
         return False
