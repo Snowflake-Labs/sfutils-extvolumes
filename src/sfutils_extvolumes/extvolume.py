@@ -669,10 +669,10 @@ def describe_external_volume(volume_name: str) -> dict[str, str]:
             "Could not find STORAGE_AWS_IAM_USER_ARN in external volume description"
         )
 
-    iam_user_arn = properties.get("iam_user_arn")
-    external_id = properties.get("external_id")
-    click.echo(f"✓ Snowflake IAM User ARN: {mask_sensitive_string(iam_user_arn, 'arn')}")  # pyright: ignore[reportArgumentType]
-    click.echo(f"✓ External ID: {mask_sensitive_string(external_id, 'external_id')}")  # pyright: ignore[reportArgumentType]
+    iam_user_arn = properties["iam_user_arn"]  # existence guaranteed by guard above
+    external_id = properties.get("external_id", "")
+    click.echo(f"✓ Snowflake IAM User ARN: {mask_sensitive_string(iam_user_arn, 'arn')}")
+    click.echo(f"✓ External ID: {mask_sensitive_string(external_id, 'external_id')}")
 
     return properties
 
