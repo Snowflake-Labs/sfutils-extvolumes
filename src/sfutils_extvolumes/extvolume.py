@@ -948,10 +948,13 @@ def create(
     aws_bucket_name = to_aws_name(bucket, prefix)
     aws_role_name = role_name or to_aws_name(f"{bucket}-snowflake-role", prefix)
     aws_policy_name = policy_name or to_aws_name(f"{bucket}-snowflake-policy", prefix)
-    aws_storage_location = storage_location_name or to_aws_name(f"{bucket}-s3-{region}", prefix)
 
     # Generate Snowflake names (uppercase, underscores, SQL-safe)
     sf_volume_name = volume_name or to_sql_identifier(f"{bucket}_external_volume", prefix)
+    # storage_location_name is a Snowflake identifier (NAME = '...' in SQL), not an AWS resource
+    sf_storage_location = storage_location_name or to_sql_identifier(
+        f"{bucket}_s3_{region}", prefix
+    )
     # Generate a unique external ID for security (prevents confused deputy problem)
     sf_external_id = external_id or generate_external_id(bucket, prefix)
     sf_comment = ctx.obj.get("comment") or format_comment(prefix, bucket)
@@ -961,7 +964,7 @@ def create(
         role_name=aws_role_name,
         policy_name=aws_policy_name,
         volume_name=sf_volume_name,
-        storage_location_name=aws_storage_location,
+        storage_location_name=sf_storage_location,
         external_id=sf_external_id,
         aws_region=region,
         allow_writes=not no_writes,

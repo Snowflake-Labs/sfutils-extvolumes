@@ -96,6 +96,22 @@ tasks:
     cmds:
       - "{{.PYTHON}} pytest tests -v"
 
+  it-unit:
+    desc: Unit tests only (pytest; no Snowflake or AWS)
+    cmds:
+      - "{{.PYTHON}} pytest tests -v"
+
+  it-smoke:
+    desc: IT shell smoke — snow JSON, create --dry-run variants, check-setup --suggest (no DDL)
+    cmds:
+      - bash scripts/it/smoke.sh
+
+  it:
+    desc: IT pipeline — it-unit, then it-smoke
+    cmds:
+      - task: it-unit
+      - task: it-smoke
+
   lint:
     desc: Check code with ruff
     cmds:
