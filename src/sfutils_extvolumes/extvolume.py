@@ -641,7 +641,7 @@ def describe_external_volume(volume_name: str) -> dict[str, str]:
             f"Verify the volume exists and you have access.\nError: {e}"
         ) from e
 
-    if not result:
+    if not isinstance(result, list) or not result:
         raise click.ClickException(
             f"No data returned when describing external volume '{volume_name}'"
         )
@@ -692,7 +692,7 @@ def verify_external_volume(volume_name: str) -> None:
 
     result = run_snow_sql(f"SELECT SYSTEM$VERIFY_EXTERNAL_VOLUME('{_sql_str(volume_name)}')")
 
-    if not result:
+    if not isinstance(result, list) or not result:
         click.echo("⚠ Could not verify external volume")
         return
 
