@@ -125,7 +125,9 @@ def run_snow_sql(
         cmd.extend(["--role", role])
 
     if _snow_cli_options.debug:
-        click.echo(f"[DEBUG] Running: {' '.join(cmd)}")
+        click.echo(f"[DEBUG] Running: snow sql --query ({len(query)} chars — set SFUTILS_DEBUG_SQL=1 to show)")
+        if os.environ.get("SFUTILS_DEBUG_SQL"):
+            click.echo(f"[DEBUG] Full cmd: {' '.join(cmd)}")
 
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
