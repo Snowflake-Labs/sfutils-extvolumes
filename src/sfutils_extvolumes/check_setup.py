@@ -201,7 +201,7 @@ def run_sql(query: str) -> list | None:
     """Execute SQL and return parsed JSON result. Uses active connection from env."""
     cmd = ["snow", "sql", "--query", query, "--format", "json"]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         return None
 
@@ -281,7 +281,7 @@ def do_run_setup(db_name: str, script_dir: Path, admin_role: str) -> bool:
         admin_role,
     ]
 
-    result = subprocess.run(cmd, env=env, capture_output=False)
+    result = subprocess.run(cmd, env=env, capture_output=False, check=False)
 
     if result.returncode == 0:
         click.echo(click.style("\n✓ Setup complete!", fg="green"))
@@ -366,7 +366,7 @@ def check(
 
     db_name = resolved_sf_utils_db(database=database, default_db=default_db)
 
-    ver_result = subprocess.run(["snow", "--version"], capture_output=True, text=True)
+    ver_result = subprocess.run(["snow", "--version"], capture_output=True, text=True, check=False)
     snow_version = ver_result.stdout.strip() if ver_result.returncode == 0 else "unknown"
     click.echo(f"Using {snow_version}")
 

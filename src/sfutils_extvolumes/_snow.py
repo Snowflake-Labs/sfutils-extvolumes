@@ -127,7 +127,7 @@ def run_snow_sql(
     if _snow_cli_options.debug:
         click.echo(f"[DEBUG] Running: {' '.join(cmd)}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
     if _snow_cli_options.debug and result.stderr:
         click.echo(f"[DEBUG] stderr: {result.stderr}")
@@ -153,7 +153,7 @@ def run_snow_sql_stdin(sql: str, *, check: bool = True) -> subprocess.CompletedP
         if os.environ.get("SFUTILS_DEBUG_SQL"):
             click.echo(sql)
 
-    result = subprocess.run(cmd, input=sql, capture_output=True, text=True)
+    result = subprocess.run(cmd, input=sql, capture_output=True, text=True, check=False)
 
     if _snow_cli_options.debug and result.stderr:
         click.echo(f"[DEBUG] stderr: {result.stderr}")

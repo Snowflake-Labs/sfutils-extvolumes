@@ -37,6 +37,7 @@ import boto3
 import click
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+
 from sfutils_extvolumes._snow import (
     mask_sensitive_string,
     run_snow_sql,
@@ -304,7 +305,7 @@ def create_s3_bucket(
                 raise click.ClickException(
                     f"Bucket {bucket_name} exists but you don't have access. "
                     "Choose a different bucket name."
-                )
+                ) from e
             if error_code != "404":
                 raise
 
@@ -331,7 +332,7 @@ def create_s3_bucket(
         return True
 
     except ClientError as e:
-        raise click.ClickException(f"Failed to create bucket: {e}")
+        raise click.ClickException(f"Failed to create bucket: {e}") from e
 
 
 def delete_s3_bucket(s3_client: Any, bucket_name: str, force: bool = False) -> None:
@@ -361,7 +362,7 @@ def delete_s3_bucket(s3_client: Any, bucket_name: str, force: bool = False) -> N
         click.echo(f"✓ Deleted bucket: {bucket_name}")
 
     except ClientError as e:
-        raise click.ClickException(f"Failed to delete bucket: {e}")
+        raise click.ClickException(f"Failed to delete bucket: {e}") from e
 
 
 # =============================================================================
@@ -439,7 +440,7 @@ def create_iam_policy(
         return policy_arn
 
     except ClientError as e:
-        raise click.ClickException(f"Failed to create IAM policy: {e}")
+        raise click.ClickException(f"Failed to create IAM policy: {e}") from e
 
 
 def delete_iam_policy(iam_client: Any, policy_arn: str) -> None:
@@ -451,7 +452,7 @@ def delete_iam_policy(iam_client: Any, policy_arn: str) -> None:
         click.echo(f"✓ Deleted policy: {policy_arn}")
     except ClientError as e:
         if e.response["Error"]["Code"] != "NoSuchEntity":
-            raise click.ClickException(f"Failed to delete policy: {e}")
+            raise click.ClickException(f"Failed to delete policy: {e}") from e
 
 
 # =============================================================================
@@ -532,7 +533,7 @@ def create_iam_role(
         return role_arn
 
     except ClientError as e:
-        raise click.ClickException(f"Failed to create IAM role: {e}")
+        raise click.ClickException(f"Failed to create IAM role: {e}") from e
 
 
 def update_role_trust_policy(
@@ -549,7 +550,7 @@ def update_role_trust_policy(
         click.echo(f"✓ Updated trust policy with Snowflake IAM user: {snowflake_user_arn}")
 
     except ClientError as e:
-        raise click.ClickException(f"Failed to update trust policy: {e}")
+        raise click.ClickException(f"Failed to update trust policy: {e}") from e
 
 
 def delete_iam_role(iam_client: Any, role_name: str, policy_arn: str) -> None:
@@ -569,7 +570,7 @@ def delete_iam_role(iam_client: Any, role_name: str, policy_arn: str) -> None:
 
     except ClientError as e:
         if e.response["Error"]["Code"] != "NoSuchEntity":
-            raise click.ClickException(f"Failed to delete role: {e}")
+            raise click.ClickException(f"Failed to delete role: {e}") from e
 
 
 # =============================================================================
@@ -638,7 +639,7 @@ def describe_external_volume(volume_name: str) -> dict[str, str]:
         raise click.ClickException(
             f"Failed to describe external volume '{volume_name}'. "
             f"Verify the volume exists and you have access.\nError: {e}"
-        )
+        ) from e
 
     if not result:
         raise click.ClickException(
@@ -1151,7 +1152,9 @@ def create(
         click.echo("─" * 40)
         click.echo("Step 2: Create IAM Policy")
         click.echo("─" * 40)
-        policy_arn = create_iam_policy(iam_client, config.policy_name, config.bucket_name, tags=aws_tags)
+        policy_arn = create_iam_policy(
+            iam_client, config.policy_name, config.bucket_name, tags=aws_tags
+        )
         created_policy = True
         click.echo()
 
@@ -1209,7 +1212,7 @@ def create(
         raise
     except Exception as e:
         rollback_aws_resources()
-        raise click.ClickException(f"Unexpected error: {e}")
+        raise click.ClickException(f"Unexpected error: {e}") from e
 
     # JSON output for successful creation
     if output == "json":

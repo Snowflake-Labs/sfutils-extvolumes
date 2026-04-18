@@ -91,6 +91,21 @@ tasks:
     vars:
       CLI_ARGS: "--delete-bucket --force"
 
+  test:
+    desc: Run unit tests
+    cmds:
+      - "{{.PYTHON}} pytest tests -v"
+
+  lint:
+    desc: Check code with ruff
+    cmds:
+      - "{{.PYTHON}} ruff check src tests"
+
+  format:
+    desc: Auto-format with ruff
+    cmds:
+      - "{{.PYTHON}} ruff format src tests"
+
   help:
     desc: Show extvolume CLI options
     cmds:
