@@ -35,6 +35,21 @@ class SnowCLIOptions:
 
 _snow_cli_options = SnowCLIOptions()
 
+# Active Snowflake connection name — set once in the CLI group from manifest.toml.
+# All snow SQL calls use this automatically (same pattern as _snow_cli_options).
+_current_connection: str | None = None
+
+
+def set_connection(connection: str | None) -> None:
+    """Set the active Snowflake connection for all subsequent snow SQL calls."""
+    global _current_connection
+    _current_connection = connection or None
+
+
+def get_connection() -> str | None:
+    """Return the currently active connection name (may be None)."""
+    return _current_connection
+
 
 def mask_aws_account_id(value: str) -> str:
     """Mask AWS account ID: 123456789012 -> 1234****9012"""
@@ -121,11 +136,13 @@ def run_snow_sql(
 ) -> dict | list | None:
     """Execute a snow sql command and return parsed JSON output."""
     cmd = ["snow", "sql", *_snow_cli_options.get_flags(), "--query", query, "--format", format]
+    if _current_connection:
+        cmd.extend(["-c", _current_connection])
     if role:
         cmd.extend(["--role", role])
 
     if _snow_cli_options.debug:
-        click.echo(f"[DEBUG] Running: snow sql --query ({len(query)} chars — set SFUTILS_DEBUG_SQL=1 to show)")
+        click.echo(f"[DEBUG] Running: snow sql --query ({len(query)} chars — set SFUTILS_DEBUG_SQL=1 to show)")  # noqa: E501
         if os.environ.get("SFUTILS_DEBUG_SQL"):
             click.echo(f"[DEBUG] Full cmd: {' '.join(cmd)}")
 
@@ -148,6 +165,8 @@ def run_snow_sql(
 def run_snow_sql_stdin(sql: str, *, check: bool = True) -> subprocess.CompletedProcess:
     """Execute multi-statement SQL via stdin."""
     cmd = ["snow", "sql", *_snow_cli_options.get_flags(), "--stdin"]
+    if _current_connection:
+        cmd.extend(["-c", _current_connection])
 
     if _snow_cli_options.debug:
         click.echo(f"[DEBUG] Running: {' '.join(cmd)}")

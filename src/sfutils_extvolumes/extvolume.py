@@ -23,27 +23,40 @@ Creates and configures:
 - Updates IAM trust policy with Snowflake's IAM user ARN and external ID
 """
 
+import datetime
 import getpass
 import json
 import os
 import re
+import subprocess
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import boto3
 import click
 from botocore.exceptions import ClientError
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from sfutils_extvolumes._snow import (
     mask_sensitive_string,
     run_snow_sql,
     run_snow_sql_stdin,
+    set_connection,
     set_masking,
     set_snow_cli_options,
+)
+from sfutils_extvolumes._toml_manifest import (
+    ensure_manifest_defaults,
+    load_manifest,
+    resolve_volume_admin_role,
+    resolve_volume_connection,
+    save_manifest,
+    upsert_volume,
+    validate_manifest,
 )
 
 # =============================================================================
@@ -686,56 +699,83 @@ def drop_external_volume(volume_name: str) -> None:
     click.echo(f"✓ Dropped external volume: {volume_name}")
 
 
-def verify_external_volume(volume_name: str) -> None:
-    """Verify external volume connectivity."""
+def verify_external_volume(volume_name: str, max_retries: int = 1) -> bool:
+    """Verify external volume connectivity.
+
+    When max_retries > 1, retries with exponential backoff on success=False
+    to handle Snowflake-side IAM propagation lag after trust policy update.
+    Returns True if verification succeeded, False otherwise.
+    """
     click.echo(f"Verifying external volume: {volume_name}")
 
-    result = run_snow_sql(f"SELECT SYSTEM$VERIFY_EXTERNAL_VOLUME('{_sql_str(volume_name)}')")
+    def _attempt() -> bool:
+        result = run_snow_sql(f"SELECT SYSTEM$VERIFY_EXTERNAL_VOLUME('{_sql_str(volume_name)}')")
 
-    if not isinstance(result, list) or not result:
-        click.echo("⚠ Could not verify external volume")
-        return
+        if not isinstance(result, list) or not result:
+            click.echo("⚠ Could not verify external volume")
+            return False
 
-    # The result column name may vary based on volume name case
-    status_json = None
-    for key, value in result[0].items():
-        if "SYSTEM$VERIFY_EXTERNAL_VOLUME" in key.upper():
-            status_json = value
-            break
+        status_json = None
+        for key, value in result[0].items():
+            if "SYSTEM$VERIFY_EXTERNAL_VOLUME" in key.upper():
+                status_json = value
+                break
 
-    if not status_json:
-        click.echo("⚠ Could not find verification result")
-        return
+        if not status_json:
+            click.echo("⚠ Could not find verification result")
+            return False
 
-    # Parse the JSON response
-    try:
-        verification = json.loads(status_json)
-        success = verification.get("success", False)
-        storage_result = verification.get("storageLocationSelectionResult", "N/A")
+        try:
+            verification = json.loads(status_json)
+            success = verification.get("success", False)
+            storage_result = verification.get("storageLocationSelectionResult", "N/A")
 
-        if success:
-            click.echo("✓ External volume verified successfully")
-        else:
-            click.echo("✗ External volume verification failed")
+            if success:
+                click.echo("✓ External volume verified successfully")
+            else:
+                click.echo("✗ External volume verification failed")
 
-        click.echo(f"  success: {success}")
-        click.echo(f"  storageLocationSelectionResult: {storage_result}")
+            click.echo(f"  success: {success}")
+            click.echo(f"  storageLocationSelectionResult: {storage_result}")
+            return bool(success)
 
-    except json.JSONDecodeError:
-        # Fallback to raw output if not valid JSON
-        if "success" in status_json.lower():
-            click.echo("✓ External volume verified successfully")
-        else:
+        except json.JSONDecodeError:
+            if "success" in status_json.lower():
+                click.echo("✓ External volume verified successfully")
+                return True
             click.echo(f"⚠ Verification result: {status_json}")
+            return False
+
+    if max_retries > 1:
+        ok = wait_with_backoff(
+            _attempt,
+            "external volume verification",
+            max_attempts=max_retries,
+            initial_delay=5.0,
+            max_delay=30.0,
+        )
+        if not ok:
+            click.echo("⚠ Verification timed out — IAM propagation may still be in progress")
+        return ok
+    return _attempt()
 
 
 # =============================================================================
 # CLI Commands
 # =============================================================================
 
-# Auto-load .env from current working directory so callers
-# don't need ``set -a && source .env && set +a`` before invoking.
-load_dotenv()
+
+def _persist_volume_state(manifest_path: object, label: str, entry: dict) -> None:
+    """Write or update a volume entry in manifest.toml. Non-fatal on error."""
+    if manifest_path is None:
+        return
+    try:
+        data = load_manifest(manifest_path)
+        ensure_manifest_defaults(data, manifest_path)
+        upsert_volume(data, label, entry)
+        save_manifest(manifest_path, data)
+    except Exception as _e:
+        click.echo(f"⚠ Could not update manifest: {_e}", err=True)
 
 
 @click.group()
@@ -749,7 +789,6 @@ load_dotenv()
 @click.option(
     "--prefix",
     "-p",
-    envvar="EXTVOLUME_PREFIX",
     default=None,
     help="Prefix for AWS resources (default: current username). Use --no-prefix to disable.",
 )
@@ -775,6 +814,13 @@ load_dotenv()
     default=None,
     help="Comment for external volume (inferred from prefix/bucket if not provided)",
 )
+@click.option(
+    "--manifest-path",
+    default=".sfutils/manifest.toml",
+    show_default=True,
+    help="Path to manifest.toml",
+    type=click.Path(),
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -784,6 +830,7 @@ def cli(
     verbose: bool,
     debug: bool,
     comment: str | None,
+    manifest_path: str,
 ) -> None:
     """
     Snowflake External Volume Manager
@@ -809,24 +856,67 @@ def cli(
     - Snowflake CLI configured (snow connection test)
     - Appropriate permissions in both AWS and Snowflake
     """
+
     # Set global snow CLI options
     set_snow_cli_options(verbose=verbose, debug=debug)
 
     ctx.ensure_object(dict)
     ctx.obj["region"] = region
+    ctx.obj["manifest_path"] = Path(manifest_path)
 
-    # Determine prefix: explicit prefix > no-prefix flag > default (username)
+    # Determine prefix: explicit prefix > no-prefix flag > manifest user > env/system username
     if no_prefix:
         ctx.obj["prefix"] = None
     elif prefix:
         ctx.obj["prefix"] = prefix
     else:
-        ctx.obj["prefix"] = get_current_username()
+        _manifest_data = load_manifest(manifest_path) if Path(manifest_path).exists() else {}
+        _manifest_user = _manifest_data.get("snowflake", {}).get("user", "")
+        ctx.obj["prefix"] = _manifest_user.lower() if _manifest_user else get_current_username()
 
     ctx.obj["comment"] = comment
 
     if ctx.obj["prefix"]:
         click.echo(f"Using prefix: {ctx.obj['prefix']}")
+
+    # Set connection from manifest so all snow SQL calls use -c <connection>.
+    _manifest = load_manifest(manifest_path)
+    _conn = resolve_volume_connection({}, _manifest)
+    if _conn:
+        set_connection(_conn)
+
+    # ── Manifest auto-gate ────────────────────────────────────────────────────
+    # Runs before every subcommand (except setup/migration commands).
+    # Auto-repairs structural gaps silently; warns on non-structural issues.
+    if Path(manifest_path).exists() and ctx.invoked_subcommand not in (
+        "validate-manifest",
+        "setup-connection",
+        "migrate",
+    ):
+        _gdata = load_manifest(manifest_path)
+        _issues_before = validate_manifest(_gdata)
+        if _issues_before:
+            ensure_manifest_defaults(_gdata, manifest_path)
+            save_manifest(manifest_path, _gdata)
+            _issues_after = validate_manifest(_gdata)
+            if _issues_after:
+                click.echo(
+                    f"\n⚠️  manifest.toml has {len(_issues_after)} issue(s) "
+                    "that need attention before this operation:",
+                    err=True,
+                )
+                for _issue in _issues_after:
+                    click.echo(f"   ✗ {_issue}", err=True)
+                click.echo(
+                    "   Run 'vol validate-manifest' for details "
+                    "or 'vol setup-connection' to fix an empty connection.\n",
+                    err=True,
+                )
+            else:
+                click.echo(
+                    f"[manifest] auto-repaired {len(_issues_before)} structural gap(s)",
+                    err=True,
+                )
 
 
 @cli.command()
@@ -834,7 +924,6 @@ def cli(
     "--bucket",
     "-b",
     required=True,
-    envvar="BUCKET",
     help="S3 bucket base name (will be prefixed with username)",
 )
 @click.option(
@@ -849,7 +938,6 @@ def cli(
 )
 @click.option(
     "--volume-name",
-    envvar="EXTERNAL_VOLUME_NAME",
     default=None,
     help="Snowflake external volume name (default: {PREFIX}_{BUCKET}_EXTERNAL_VOLUME)",
 )
@@ -891,6 +979,18 @@ def cli(
     default="text",
     help="Output format (default: text)",
 )
+@click.option(
+    "--aws-profile",
+    default=None,
+    envvar="AWS_PROFILE",
+    help="AWS profile name (sets AWS_PROFILE for boto3 session)",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Accepted for scripting compatibility (create does not prompt interactively)",
+)
 @click.pass_context
 def create(
     ctx: click.Context,
@@ -905,6 +1005,8 @@ def create(
     dry_run: bool,
     force: bool,
     output: str,
+    aws_profile: str | None,
+    yes: bool,
 ) -> None:
     """
     Create S3 bucket, IAM role, and Snowflake external volume.
@@ -1104,10 +1206,14 @@ def create(
         click.echo("To create these resources, run without --dry-run")
         return
 
-    # Initialize AWS clients
-    s3_client = boto3.client("s3", region_name=region)
-    iam_client = boto3.client("iam")
-    sts_client = boto3.client("sts")
+    # Initialize AWS clients (use named profile when provided)
+    _boto_session = boto3.Session(
+        profile_name=aws_profile,
+        region_name=region,
+    )
+    s3_client = _boto_session.client("s3", region_name=region)
+    iam_client = _boto_session.client("iam")
+    sts_client = _boto_session.client("sts")
 
     account_id = get_aws_account_id(sts_client)
     policy_arn = f"arn:aws:iam::{account_id}:policy/{config.policy_name}"
@@ -1199,16 +1305,47 @@ def create(
         )
         click.echo()
 
+        # Volume exists, trust policy sent — write CREATE_IN_PROGRESS while IAM propagates
+        _manifest_path = ctx.obj.get("manifest_path")
+        _label = config.volume_name.lower().replace("_", "-")
+        _now_ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _base_manifest = load_manifest(_manifest_path) if _manifest_path else {}
+        _vol_entry: dict = {
+            "status": "CREATE_IN_PROGRESS",
+            "created_at": _now_ts,
+            "updated_at": _now_ts,
+            "volume_name": config.volume_name,
+            "storage_type": "s3",
+            "bucket_url": f"s3://{config.bucket_name}",
+            "aws_region": config.aws_region,
+            "storage_aws_role_arn": role_arn,
+            "external_id": actual_external_id,
+            "admin_role": resolve_volume_admin_role({}, _base_manifest),
+            "cleanup": {"volume_name": config.volume_name},
+        }
+        if aws_profile:
+            _vol_entry["aws_profile"] = aws_profile
+        _persist_volume_state(_manifest_path, _label, _vol_entry)
+
         # Wait for trust policy propagation with backoff
         wait_for_trust_policy(iam_client, config.role_name, sf_props["iam_user_arn"])
 
-        # Step 7: Verify
+        # Step 7: Verify — COMPLETE only written after verify succeeds
         if not skip_verify:
             click.echo("─" * 40)
             click.echo("Step 7: Verify External Volume")
             click.echo("─" * 40)
-            verify_external_volume(config.volume_name)
+            verified = verify_external_volume(config.volume_name, max_retries=6)
             click.echo()
+        else:
+            verified = True  # user explicitly skipped verify — trust IAM propagation confirmation
+
+        if verified:
+            _persist_volume_state(_manifest_path, _label, {
+                **_vol_entry,
+                "status": "COMPLETE",
+                "updated_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
 
     except click.ClickException:
         rollback_aws_resources()
@@ -1259,7 +1396,6 @@ def create(
     "--bucket",
     "-b",
     required=True,
-    envvar="BUCKET",
     help="S3 bucket base name (same as used in create)",
 )
 @click.option(
@@ -1274,7 +1410,6 @@ def create(
 )
 @click.option(
     "--volume-name",
-    envvar="EXTERNAL_VOLUME_NAME",
     default=None,
     help="Snowflake external volume name (default: {PREFIX}_{BUCKET}_EXTERNAL_VOLUME)",
 )
@@ -1365,6 +1500,17 @@ def delete(
 
     deleted_resources = []
 
+    # Gate: write DELETE_IN_PROGRESS before any resource deletion starts
+    _del_manifest_path = ctx.obj.get("manifest_path")
+    _del_label = sf_volume_name.lower().replace("_", "-")
+    _del_now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _del_data = load_manifest(_del_manifest_path) if _del_manifest_path else {}
+    if _del_data.get("volume", {}).get(_del_label):
+        _del_entry = dict(_del_data["volume"][_del_label])
+        _del_entry["status"] = "DELETE_IN_PROGRESS"
+        _del_entry["updated_at"] = _del_now
+        _persist_volume_state(_del_manifest_path, _del_label, _del_entry)
+
     # Step 1: Drop external volume
     if output == "text":
         click.echo("─" * 40)
@@ -1413,29 +1559,43 @@ def delete(
         click.echo("✓ Resources deleted successfully!")
         click.echo("=" * 60)
 
+    # Update manifest.toml: mark volume as REMOVED
+    if _del_data.get("volume", {}).get(_del_label):
+        _persist_volume_state(_del_manifest_path, _del_label, {
+            **_del_entry,
+            "status": "REMOVED",
+            "updated_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "removed_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+
 
 @cli.command()
 @click.option(
     "--volume-name",
     "-v",
-    envvar="EXTERNAL_VOLUME_NAME",
     required=True,
     help="Snowflake external volume name",
 )
-def verify(volume_name: str) -> None:
+@click.option(
+    "--retry",
+    is_flag=True,
+    help="Retry with exponential backoff on failure (for IAM propagation lag)",
+)
+def verify(volume_name: str, retry: bool) -> None:
     """
     Verify an existing external volume.
 
     \b
     Example:
-        extvolume verify --volume-name my_external_volume
+        vol verify --volume-name my_external_volume
+        vol verify --volume-name my_external_volume --retry
     """
     click.echo("=" * 60)
     click.echo("Snowflake External Volume Manager - Verify")
     click.echo("=" * 60)
     click.echo()
 
-    verify_external_volume(volume_name)
+    verify_external_volume(volume_name, max_retries=6 if retry else 1)
 
     click.echo()
     click.echo("=" * 60)
@@ -1445,7 +1605,6 @@ def verify(volume_name: str) -> None:
 @click.option(
     "--volume-name",
     "-v",
-    envvar="EXTERNAL_VOLUME_NAME",
     required=True,
     help="Snowflake external volume name",
 )
@@ -1477,7 +1636,6 @@ def describe(volume_name: str) -> None:
 @click.option(
     "--bucket",
     "-b",
-    envvar="BUCKET",
     default=None,
     help="S3 bucket base name (to derive role and volume names)",
 )
@@ -1490,7 +1648,6 @@ def describe(volume_name: str) -> None:
 @click.option(
     "--volume-name",
     "-v",
-    envvar="EXTERNAL_VOLUME_NAME",
     default=None,
     help="Snowflake external volume name (or derived from --bucket)",
 )
@@ -1552,6 +1709,334 @@ def update_trust(
     click.echo("=" * 60)
     click.echo("✓ Trust policy updated successfully!")
     click.echo("=" * 60)
+
+
+@cli.command(name="setup-connection")
+@click.option(
+    "--connection",
+    "-c",
+    required=True,
+    help="Snowflake connection name (from snow connection list)",
+)
+@click.option(
+    "--admin-role",
+    default=None,
+    help="Admin role to cache in manifest.toml (default: ACCOUNTADMIN)",
+)
+@click.pass_context
+def setup_connection_command(
+    ctx: click.Context,
+    connection: str,
+    admin_role: str | None,
+) -> None:
+    """Persist a Snowflake connection to manifest.toml and cache its metadata.
+
+    \b
+    Example:
+        snow connection list              # see available connections
+        vol setup-connection -c local-oauth
+    """
+
+    manifest_path = ctx.obj.get("manifest_path", ".sfutils/manifest.toml")
+
+    # Test the connection
+    click.echo(f"Testing connection '{connection}'...")
+    _res = subprocess.run(
+        ["snow", "connection", "test", "-c", connection, "--format", "json"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if _res.returncode != 0:
+        raise click.ClickException(
+            f"Connection test failed for '{connection}':\n{_res.stderr.strip()}"
+        )
+
+    # Parse metadata
+    try:
+        _meta = json.loads(_res.stdout)
+        account = str(_meta.get("Account") or _meta.get("account") or "").strip()
+        user = str(_meta.get("User") or _meta.get("user") or "").strip()
+        host = str(_meta.get("Host") or _meta.get("host") or "").strip()
+        account_url = f"https://{host}" if host else ""
+    except Exception:
+        account = user = account_url = ""
+
+    # Load or init manifest
+    data = load_manifest(manifest_path)
+    ensure_manifest_defaults(data, manifest_path)
+
+    sf = data.setdefault("snowflake", {})
+    sf["connection"] = connection
+    if account:
+        sf["account"] = account
+    if user:
+        sf["user"] = user
+    if account_url:
+        sf["account_url"] = account_url
+    if admin_role:
+        sf["admin_role"] = admin_role
+    else:
+        sf.setdefault("admin_role", "ACCOUNTADMIN")
+
+    save_manifest(manifest_path, data)
+    set_connection(connection)
+
+    click.echo(f"✓ Connection '{connection}' saved to {manifest_path}")
+    if account:
+        click.echo(f"  account:     {account}")
+    if account_url:
+        click.echo(f"  account_url: {account_url}")
+    if user:
+        click.echo(f"  user:        {user}")
+
+
+@cli.command(name="validate-manifest")
+@click.option(
+    "--fix",
+    is_flag=True,
+    default=False,
+    help="Fill in missing sections with defaults before validating.",
+)
+@click.pass_context
+def validate_manifest_command(ctx: click.Context, fix: bool) -> None:
+    """Validate manifest.toml structure and report issues.
+
+    Exits with code 1 if validation fails — useful for CI/CD gating.
+
+    \b
+    Example:
+        vol validate-manifest
+        vol validate-manifest --fix
+    """
+
+    manifest_path = ctx.obj.get("manifest_path", ".sfutils/manifest.toml")
+
+    if not Path(manifest_path).exists():
+        if fix:
+            data: dict = {}
+            ensure_manifest_defaults(data, manifest_path)
+            save_manifest(manifest_path, data)
+            click.echo(f"✓ Created {manifest_path} with default structure")
+        else:
+            raise click.ClickException(
+                f"manifest.toml not found at {manifest_path}. "
+                "Run 'vol setup-connection' to initialise, or use --fix to create a skeleton."
+            )
+    else:
+        data = load_manifest(manifest_path)
+
+    if fix:
+        before = validate_manifest(data)
+        ensure_manifest_defaults(data, manifest_path)
+        save_manifest(manifest_path, data)
+        after = validate_manifest(data)
+        fixed_count = len(before) - len(after)
+        if fixed_count > 0:
+            click.echo(f"✓ Repaired {fixed_count} issue(s) in {manifest_path}")
+        data = load_manifest(manifest_path)
+
+    issues = validate_manifest(data)
+
+    if issues:
+        click.echo(f"✗ manifest.toml validation failed ({len(issues)} issue(s)):", err=True)
+        for issue in issues:
+            click.echo(f"  ✗ {issue}", err=True)
+        if not fix:
+            click.echo(
+                "  Tip: run 'vol validate-manifest --fix' to repair structural gaps",
+                err=True,
+            )
+        raise SystemExit(1)
+
+    vol_count = len(data.get("volume", {}))
+    click.echo(
+        f"✓ manifest.toml is valid  "
+        f"(connection: {data.get('snowflake', {}).get('connection', '(not set)')}, "
+        f"volumes: {vol_count})"
+    )
+
+
+@cli.command(name="list")
+@click.pass_context
+def list_volumes(ctx: click.Context) -> None:
+    """List all external volumes recorded in manifest.toml."""
+    manifest_path = ctx.obj.get("manifest_path", ".sfutils/manifest.toml")
+    data = load_manifest(manifest_path)
+    volumes = data.get("volume", {})
+
+    if not volumes:
+        if not Path(manifest_path).exists():
+            click.echo(f"No manifest found at {manifest_path}. Run 'vol setup-connection' first.")
+        else:
+            click.echo("No volume entries found in manifest.toml.")
+        return
+
+    click.echo(f"\n{'LABEL':<30} {'VOLUME_NAME':<35} {'TYPE':<8} {'STATUS'}")
+    click.echo("─" * 85)
+    for label, vol in volumes.items():
+        status = vol.get("status", "—")
+        status_display = (
+            click.style(status, fg="green") if status == "COMPLETE"
+            else click.style(status, fg="yellow") if status in (
+                "CREATE_IN_PROGRESS", "DELETE_IN_PROGRESS"
+            )
+            else click.style(status, fg="red") if status in ("REMOVED", "DELETED")
+            else status
+        )
+        click.echo(
+            f"{label:<30} {vol.get('volume_name', '—'):<35} "
+            f"{vol.get('storage_type', '—'):<8} {status_display}"
+        )
+    click.echo()
+
+
+@cli.command(name="migrate")
+@click.option(
+    "--env-path",
+    type=click.Path(),
+    default=".env",
+    help=".env file to read connection from (default: .env)",
+)
+@click.option(
+    "--manifest-md",
+    type=click.Path(),
+    default=".sfutils/sfutils-manifest.md",
+    help="Legacy markdown manifest (default: .sfutils/sfutils-manifest.md)",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would be written without writing")
+@click.pass_context
+def migrate_command(
+    ctx: click.Context,
+    env_path: str,
+    manifest_md: str,
+    dry_run: bool,
+) -> None:
+    """Migrate sfutils-manifest.md + .env to manifest.toml.
+
+    sfutils-manifest.md is the PRIMARY source (volume_name, bucket_url,
+    status, admin_role, project_name, prereqs).  .env is SUPPLEMENTARY
+    (connection info only).
+
+    \b
+    Run 'vol check-setup' after migrate to re-verify tools.
+
+    \b
+    Example:
+        vol migrate --dry-run
+        vol migrate
+    """
+
+    manifest_path = ctx.obj.get("manifest_path", ".sfutils/manifest.toml")
+
+    # ── Read legacy sources ──────────────────────────────────────────────────
+    env_vals = dotenv_values(env_path) if Path(env_path).exists() else {}
+    md_text = Path(manifest_md).read_text(encoding="utf-8") if Path(manifest_md).exists() else ""
+
+    sources = [s for s in (env_path, manifest_md) if Path(s).exists()]
+
+    # Connection info from .env only
+    connection = env_vals.get("SNOWFLAKE_DEFAULT_CONNECTION_NAME", "")
+    account = env_vals.get("SNOWFLAKE_ACCOUNT", "")
+    sf_user = env_vals.get("SNOWFLAKE_USER", "")
+    account_url = env_vals.get("SNOWFLAKE_ACCOUNT_URL", "")
+
+    # ── Parse markdown manifest via regex ────────────────────────────────────
+    def _extract(pattern: str, text: str, default: str = "") -> str:
+        m = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
+        return m.group(1).strip() if m else default
+
+    volume_name = _extract(
+        r"(?:\*\*(?:External[_ ])?Volume[_ ]?Name:\*\*|^(?:External[_ ])?Volume[_ ]?Name:)\s*(\S+)",
+        md_text,
+    ).upper()
+    bucket_url = _extract(r"(?:\*\*Bucket[_ ]URL:\*\*|^Bucket[_ ]URL:|^Bucket:)\s*(\S+)", md_text)
+    aws_region = _extract(r"(?:\*\*(?:AWS[_ ])?Region:\*\*|^(?:AWS[_ ])?Region:)\s*(\S+)", md_text)
+    role_arn = _extract(
+        r"(?:\*\*(?:Storage[_ ]AWS[_ ])?Role[_ ]ARN:\*\*"
+        r"|^(?:Storage[_ ]AWS[_ ])?Role[_ ]ARN:)\s*(\S+)",
+        md_text,
+    )
+    external_id = _extract(r"(?:\*\*External[_ ]ID:\*\*|^External[_ ]ID:)\s*(\S+)", md_text)
+    admin_role = _extract(
+        r"(?:\*\*Admin[_ ]Role:\*\*|^Admin[_ ]Role:|^programmatic-access-token:)\s*(\S+)",
+        md_text, "ACCOUNTADMIN",
+    )
+    project_name = _extract(r"(?:\*\*project_name:\*\*|^project_name:)\s*(\S+)", md_text)
+    tools_verified = _extract(r"(?:^tools_verified:)\s*(\S+)", md_text)
+    status_raw = _extract(r"(?:\*\*Status:\*\*|^Status:)\s*(\S+)", md_text, "REMOVED")
+    _valid_statuses = {"CREATE_IN_PROGRESS", "DELETE_IN_PROGRESS", "COMPLETE", "REMOVED", "DELETED"}
+    _status_up = status_raw.upper()
+    status = "REMOVED" if _status_up == "DELETED" else (_status_up if _status_up in _valid_statuses else "REMOVED")
+
+    # ── Build manifest data ──────────────────────────────────────────────────
+    data = load_manifest(manifest_path) if Path(manifest_path).exists() else {}
+    ensure_manifest_defaults(data, manifest_path)
+
+    sf = data.setdefault("snowflake", {})
+    if connection:
+        sf["connection"] = connection
+    if account:
+        sf["account"] = account
+    if sf_user:
+        sf["user"] = sf_user
+    if account_url:
+        sf["account_url"] = account_url
+    if project_name:
+        data["project_name"] = project_name
+
+    data["prereqs"] = {
+        "tools_verified": tools_verified or datetime.date.today().isoformat(),
+    }
+
+    # ── Build volume entry ───────────────────────────────────────────────────
+    if volume_name:
+        _label = volume_name.lower().replace("_", "-")
+        _now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Remove stale entries for same volume_name with different labels
+        stale = [
+            lbl for lbl, v in data.get("volume", {}).items()
+            if v.get("volume_name", "").upper() == volume_name and lbl != _label
+        ]
+        for stale_lbl in stale:
+            click.echo(f"  [migrate] removing stale '[volume.{stale_lbl}]' → '[volume.{_label}]'")
+            del data["volume"][stale_lbl]
+
+        vol_entry: dict = {
+            "status": status,
+            "created_at": _now,
+            "updated_at": _now,
+            "volume_name": volume_name,
+            "storage_type": "s3",
+            "admin_role": admin_role or "ACCOUNTADMIN",
+            "cleanup": {"volume_name": volume_name},
+        }
+        if bucket_url:
+            vol_entry["bucket_url"] = bucket_url
+        if aws_region:
+            vol_entry["aws_region"] = aws_region
+        if role_arn:
+            vol_entry["storage_aws_role_arn"] = role_arn
+        if external_id:
+            vol_entry["external_id"] = external_id
+        upsert_volume(data, _label, vol_entry)
+
+    # ── Dry-run summary ──────────────────────────────────────────────────────
+    if dry_run:
+        click.echo(f"[dry-run] Would write to: {manifest_path}")
+        click.echo(f"[dry-run] Sources:       {', '.join(sources) or '(none found)'}")
+        click.echo(f"[dry-run] project_name:  {data.get('project_name', '?')}")
+        click.echo(f"[dry-run] connection:    {connection or '(not set)'}")
+        click.echo(f"[dry-run] volumes:       {len(data.get('volume', {}))}")
+        for lbl, v in data.get("volume", {}).items():
+            click.echo(f"  [{lbl}] {v.get('volume_name', '?')} ({v.get('status', '?')})")
+        return
+
+    # ── Write manifest ───────────────────────────────────────────────────────
+    save_manifest(manifest_path, data)
+    click.echo(f"✓ Written to {manifest_path}")
+    click.echo(f"  Sources:    {', '.join(sources) or '(none — skeleton only)'}")
+    click.echo(f"  Volumes:    {len(data.get('volume', {}))}")
+    click.echo("  Old files were NOT modified.")
 
 
 if __name__ == "__main__":

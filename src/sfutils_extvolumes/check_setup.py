@@ -12,38 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pre-flight check for sfutils shared infrastructure (database + schemas).
+"""Pre-flight check for sfutils-extvolumes tool readiness.
 
-Checks whether the SF_UTILS_DB database exists (via Snowflake CLI). Optionally
-reports CSP CLI tool availability on PATH and credential-related environment
-variables (set/unset only, never values) for external volume workflows per
-storage provider (S3/aws, Azure/az, GCS/gcloud).
+Checks whether the snow CLI and CSP CLI tools (aws/az/gcloud) are available
+and credential env signals are present.  External volumes are account-level
+Snowflake objects — no database setup is needed.
+
+On success writes [prereqs].tools_verified to manifest.toml so subsequent
+skill steps can skip re-checking.
 """
 
+import datetime
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import click
-from dotenv import load_dotenv
 
-load_dotenv()
+from sfutils_extvolumes._toml_manifest import load_manifest, save_manifest
 
-DEFAULT_DB = "SF_UTILS"
-
-
-def resolved_sf_utils_db(*, database: str | None, default_db: str) -> str:
-    """Resolve database name: CLI arg, then SF_UTILS_DB, then legacy SNOW_UTILS_DB."""
-    return (
-        database
-        or os.environ.get("SF_UTILS_DB")
-        or os.environ.get("SNOW_UTILS_DB")
-        or default_db
-    )
+DEFAULT_MANIFEST_PATH = ".sfutils/manifest.toml"
 
 
 def resolved_sa_admin_role(*, admin_role: str | None) -> str:
@@ -77,7 +69,6 @@ PROVIDER_CREDENTIAL_ENV_VARS: dict[str, list[str]] = {
         "AWS_REGION",
         "AWS_DEFAULT_REGION",
     ],
-    # Placeholder for future Azure volume workflow — extend OR logic when implemented.
     "azure": [
         "AZURE_CLIENT_ID",
         "AZURE_TENANT_ID",
@@ -86,7 +77,6 @@ PROVIDER_CREDENTIAL_ENV_VARS: dict[str, list[str]] = {
         "AZURE_CLIENT_CERTIFICATE_PATH",
         "AZURE_AUTHORITY_HOST",
     ],
-    # Placeholder for future GCS workflow — extend OR logic when implemented.
     "gcs": [
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GCLOUD_PROJECT",
@@ -111,8 +101,7 @@ def csp_credential_signal_for_provider(
 ) -> tuple[bool, str | None, str | None]:
     """Return (signal, satisfied_by, note_if_no_signal).
 
-    Satisfaction uses OR branches only: one auth style is enough. Region vars
-    are not part of the credential signal for AWS.
+    Satisfaction uses OR branches only: one auth style is enough.
     """
     if provider_key == "s3":
         if _env_nonempty("AWS_ACCESS_KEY_ID") and _env_nonempty("AWS_SECRET_ACCESS_KEY"):
@@ -197,9 +186,31 @@ def require_snow_cli() -> None:
         sys.exit(2)
 
 
-def run_sql(query: str) -> list | None:
-    """Execute SQL and return parsed JSON result. Uses active connection from env."""
+def _manifest_connection(manifest_path: str = DEFAULT_MANIFEST_PATH) -> str | None:
+    """Read [snowflake].connection from manifest.toml. Returns None if not set."""
+    p = Path(manifest_path)
+    if not p.exists():
+        return None
+    try:
+        with p.open("rb") as fh:
+            data = tomllib.load(fh)
+        return data.get("snowflake", {}).get("connection") or None
+    except Exception:
+        return None
+
+
+def run_sql(query: str, connection: str | None = None) -> list | None:
+    """Execute SQL and return parsed JSON result.
+
+    Uses *connection* if provided, otherwise falls back to the manifest
+    connection, then the SNOWFLAKE_DEFAULT_CONNECTION_NAME env var.
+    """
+    conn = connection or _manifest_connection() or os.environ.get(
+        "SNOWFLAKE_DEFAULT_CONNECTION_NAME"
+    )
     cmd = ["snow", "sql", "--query", query, "--format", "json"]
+    if conn:
+        cmd.extend(["-c", conn])
 
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -213,30 +224,58 @@ def run_sql(query: str) -> list | None:
     return None
 
 
-def _sql_str(value: str) -> str:
-    """Escape a value for safe use inside a SQL single-quoted literal."""
-    return value.replace("'", "''")
-
-
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
-
-
-def _assert_safe_identifier(value: str, label: str = "identifier") -> None:
-    """Raise ClickException if value is not a safe unquoted SQL identifier."""
-    if not _IDENT_RE.match(value):
-        raise click.ClickException(
-            f"Invalid {label} '{value}': must match ^[A-Za-z_][A-Za-z0-9_$]*$"
-        )
-
-
-def check_database_exists(db_name: str) -> bool:
-    """Check if a database exists."""
-    _assert_safe_identifier(db_name, "db_name")
+def _fetch_connection_metadata(connection: str) -> dict:
+    """Fetch account/user/account_url via snow connection test -c <connection>."""
+    cmd = ["snow", "connection", "test", "-c", connection, "--format", "json"]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return {}
     try:
-        result = run_sql(f"SHOW DATABASES LIKE '{_sql_str(db_name)}'")
-        return result is not None and len(result) > 0
+        data = json.loads(result.stdout)
+        if isinstance(data, list) and data:
+            data = data[0]
+        host = (
+            data.get("Host") or data.get("host") or data.get("SnowflakeHost") or ""
+        )
+        return {
+            "account": str(data.get("Account") or data.get("account") or "").strip(),
+            "user": str(data.get("User") or data.get("user") or "").strip(),
+            "account_url": f"https://{host}".strip() if host else "",
+        }
     except Exception:
-        return False
+        return {}
+
+
+def _update_manifest_prereqs(
+    manifest_path: str,
+    connection: str | None,
+    admin_role: str,
+) -> None:
+    """Write connection metadata and tools_verified date to manifest after tools verified.
+
+    For external volumes, tools_verified means snow + CSP CLI are confirmed on PATH.
+    No database setup is needed for account-level external volume objects.
+    """
+    p = Path(manifest_path)
+    if not p.exists():
+        return
+    data = load_manifest(manifest_path)
+    if not data:
+        return
+
+    sf = data.setdefault("snowflake", {})
+    if connection:
+        sf["connection"] = connection
+        meta = _fetch_connection_metadata(connection)
+        for k, v in meta.items():
+            if v:
+                sf[k] = v
+    sf.setdefault("admin_role", admin_role)
+
+    prereqs = data.setdefault("prereqs", {})
+    prereqs["tools_verified"] = datetime.date.today().isoformat()
+
+    save_manifest(manifest_path, data)
 
 
 def csp_cli_tools_for_provider(provider_key: str) -> tuple[list[dict[str, object]], bool]:
@@ -255,55 +294,13 @@ def csp_cli_tools_for_provider(provider_key: str) -> tuple[list[dict[str, object
     return tools, all_available
 
 
-def do_run_setup(db_name: str, script_dir: Path, admin_role: str) -> bool:
-    """Run the setup script using admin_role for snow CLI and templating env."""
-    setup_sql = script_dir / "sfutils-setup.sql"
-    if not setup_sql.exists():
-        click.echo(click.style(f"Setup script not found: {setup_sql}", fg="red"))
-        return False
-
-    click.echo(f"\nRunning setup with role {admin_role}...")
-    click.echo(f"  SF_UTILS_DB: {db_name}")
-    click.echo()
-
-    env = os.environ.copy()
-    env["SF_UTILS_DB"] = db_name
-    env["SA_ADMIN_ROLE"] = admin_role
-
-    cmd = [
-        "snow",
-        "sql",
-        "-f",
-        str(setup_sql),
-        "--enable-templating",
-        "ALL",
-        "--role",
-        admin_role,
-    ]
-
-    result = subprocess.run(cmd, env=env, capture_output=False, check=False)
-
-    if result.returncode == 0:
-        click.echo(click.style("\n✓ Setup complete!", fg="green"))
-        return True
-    else:
-        click.echo(click.style("\n✗ Setup failed", fg="red"))
-        return False
-
-
 @click.command()
-@click.option(
-    "--database",
-    "-d",
-    help="Database name (or set SF_UTILS_DB env var; legacy SNOW_UTILS_DB accepted)",
-)
-@click.option("--run-setup", is_flag=True, help="Run setup if infrastructure missing")
 @click.option("--suggest", is_flag=True, help="Output suggested defaults as JSON")
 @click.option(
     "--admin-role",
     envvar="SA_ADMIN_ROLE",
     default=None,
-    help="Admin role for setup (or set SA_ADMIN_ROLE env var; default ACCOUNTADMIN)",
+    help="Admin role to cache in manifest (default: ACCOUNTADMIN)",
 )
 @click.option(
     "--provider",
@@ -311,25 +308,33 @@ def do_run_setup(db_name: str, script_dir: Path, admin_role: str) -> bool:
     default="s3",
     help="Storage provider: which CSP CLI tools and credential env vars to check (default: s3).",
 )
+@click.option(
+    "--manifest-path",
+    default=DEFAULT_MANIFEST_PATH,
+    show_default=True,
+    help="Path to manifest.toml",
+)
 def check(
-    database: str | None,
-    run_setup: bool,
     suggest: bool,
     admin_role: str | None,
     provider: str,
+    manifest_path: str,
 ) -> None:
-    """Check if sfutils infrastructure is set up.
+    """Check that snow CLI and CSP tools are ready for external volume creation.
 
-    Non-interactive - all values via CLI args or env vars.
-    Designed to be called by Cortex Code skills.
+    External volumes are account-level Snowflake objects — no database setup
+    is needed.  This command verifies:
+      - snow CLI is on PATH
+      - CSP CLI tools (aws/az/gcloud) are on PATH for the selected provider
+      - Credential env signals are present (informational only)
+
+    On success, writes [prereqs].tools_verified to manifest.toml.
 
     Exit codes:
-      0 - Infrastructure ready
-      1 - Infrastructure missing (setup not requested or failed)
+      0 - Tools ready
+      1 - Required tools missing
       2 - Error during check (e.g. snow CLI missing)
     """
-    script_dir = Path(__file__).resolve().parent
-
     require_snow_cli()
 
     provider_key = provider.lower()
@@ -337,19 +342,16 @@ def check(
     cred_env = csp_credential_env_snapshot(provider_key)
     cred_signal, cred_satisfied_by, cred_note = csp_credential_signal_for_provider(provider_key)
 
-    user = os.environ.get("SNOWFLAKE_USER", "").upper()
-    default_db = f"{user}_SF_UTILS" if user else DEFAULT_DB
+    connection = _manifest_connection(manifest_path) or os.environ.get(
+        "SNOWFLAKE_DEFAULT_CONNECTION_NAME"
+    )
 
     if suggest:
-        db_to_check = resolved_sf_utils_db(database=database, default_db=default_db)
-        db_exists = check_database_exists(db_to_check)
         click.echo(
             json.dumps(
                 {
-                    "user": user or None,
-                    "suggested_database": default_db,
-                    "database_exists": db_exists,
-                    "ready": db_exists,
+                    "connection": connection or None,
+                    "ready": csp_tools_ready,
                     "provider": provider_key,
                     "csp_cli_tools": csp_tools,
                     "csp_tools_ready": csp_tools_ready,
@@ -364,17 +366,11 @@ def check(
         )
         sys.exit(0)
 
-    db_name = resolved_sf_utils_db(database=database, default_db=default_db)
-
     ver_result = subprocess.run(["snow", "--version"], capture_output=True, text=True, check=False)
     snow_version = ver_result.stdout.strip() if ver_result.returncode == 0 else "unknown"
     click.echo(f"Using {snow_version}")
 
-    click.echo("sfutils infrastructure check\n")
-    if user:
-        click.echo(f"Detected user: {user}")
-    click.echo(f"  SF_UTILS_DB: {db_name}\n")
-
+    click.echo("sfutils-extvolumes pre-flight check\n")
     click.echo(f"CSP CLI tools (provider={provider_key})")
     for entry in csp_tools:
         exe = str(entry["tool"])
@@ -394,28 +390,19 @@ def check(
         click.echo(click.style(f"  Note: {cred_note}", fg="yellow"))
     click.echo()
 
-    db_exists = check_database_exists(db_name)
-
-    if db_exists:
-        click.echo(click.style("✓ Infrastructure ready", fg="green"))
-        click.echo(f"  Database: {db_name}")
-        click.echo(f"  Schemas: {db_name}.NETWORKS, {db_name}.POLICIES")
-        sys.exit(0)
-
-    click.echo(click.style("⚠ Infrastructure not ready", fg="yellow"))
-    click.echo(f"  ✗ Database {db_name} does not exist")
-
-    if not run_setup:
-        click.echo("\nTo create infrastructure, re-run with --run-setup")
+    if not csp_tools_ready:
+        click.echo(click.style("⚠ Required CSP CLI tools missing", fg="yellow"))
+        for entry in csp_tools:
+            if not bool(entry["available"]):
+                click.echo(f"  ✗ {entry['tool']} not found on PATH")
         sys.exit(1)
 
-    click.echo("\nRunning setup...")
-    click.echo(f"  - Database: {db_name}")
-    click.echo(f"  - Schemas: {db_name}.NETWORKS, {db_name}.POLICIES")
-
+    click.echo(click.style("✓ Tools ready", fg="green"))
     resolved_role = resolved_sa_admin_role(admin_role=admin_role)
-    success = do_run_setup(db_name, script_dir, resolved_role)
-    sys.exit(0 if success else 1)
+    _update_manifest_prereqs(manifest_path, connection, resolved_role)
+    if Path(manifest_path).exists():
+        click.echo(f"  tools_verified written to {manifest_path}")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
