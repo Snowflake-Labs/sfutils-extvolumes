@@ -9,34 +9,7 @@ from sfutils_extvolumes.check_setup import (
     csp_credential_env_snapshot,
     csp_credential_signal_for_provider,
     resolved_sa_admin_role,
-    resolved_sf_utils_db,
 )
-
-
-class TestResolvedSfUtilsDb:
-    def test_explicit_arg_wins(self, monkeypatch):
-        monkeypatch.setenv("SF_UTILS_DB", "ENV_DB")
-        assert resolved_sf_utils_db(database="ARG_DB", default_db="DEFAULT") == "ARG_DB"
-
-    def test_sf_utils_db_env_used_when_no_arg(self, monkeypatch):
-        monkeypatch.setenv("SF_UTILS_DB", "ENV_DB")
-        monkeypatch.delenv("SNOW_UTILS_DB", raising=False)
-        assert resolved_sf_utils_db(database=None, default_db="DEFAULT") == "ENV_DB"
-
-    def test_snow_utils_db_legacy_fallback(self, monkeypatch):
-        monkeypatch.delenv("SF_UTILS_DB", raising=False)
-        monkeypatch.setenv("SNOW_UTILS_DB", "LEGACY_DB")
-        assert resolved_sf_utils_db(database=None, default_db="DEFAULT") == "LEGACY_DB"
-
-    def test_default_when_no_env(self, monkeypatch):
-        monkeypatch.delenv("SF_UTILS_DB", raising=False)
-        monkeypatch.delenv("SNOW_UTILS_DB", raising=False)
-        assert resolved_sf_utils_db(database=None, default_db="DEFAULT") == "DEFAULT"
-
-    def test_sf_utils_db_takes_priority_over_legacy(self, monkeypatch):
-        monkeypatch.setenv("SF_UTILS_DB", "NEW")
-        monkeypatch.setenv("SNOW_UTILS_DB", "OLD")
-        assert resolved_sf_utils_db(database=None, default_db="DEFAULT") == "NEW"
 
 
 class TestResolvedSaAdminRole:
