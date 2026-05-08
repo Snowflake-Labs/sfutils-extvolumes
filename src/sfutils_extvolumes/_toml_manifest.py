@@ -145,6 +145,16 @@ def _write_table(section: dict, ordered_keys: list[str]) -> list[str]:
     return lines
 
 
+def _write_subtable(lines: list[str], prefix: str, table: dict) -> None:
+    """Recursively emit TOML sub-tables at any depth."""
+    for k, v in table.items():
+        if isinstance(v, dict):
+            lines += ["", f"[{prefix}.{k}]"]
+            _write_subtable(lines, f"{prefix}.{k}", v)
+        else:
+            lines.append(f"{k:<20} = {_toml_value(v)}")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -259,13 +269,7 @@ def save_manifest(path: Path | str, data: dict) -> None:
         if "." in key:
             continue
         lines += ["", _section_comment(f"{key} (preserved by sfutils-extvolumes)"), f"[{key}]"]
-        for k, v in val.items():
-            if isinstance(v, dict):
-                lines += ["", f"[{key}.{k}]"]
-                for sk, sv in v.items():
-                    lines.append(f"{sk:<20} = {_toml_value(sv)}")
-            else:
-                lines.append(f"{k:<20} = {_toml_value(v)}")
+        _write_subtable(lines, key, val)
 
     content = "\n".join(lines) + "\n"
     p.write_text(content, encoding="utf-8")
